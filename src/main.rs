@@ -1,133 +1,110 @@
-// src/main.rs
-
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
-
 use eframe::{egui, App, Frame, NativeOptions};
-use egui::plot::{Line, Plot, Value, Values};
 use serde::{Deserialize, Serialize};
-use std::error::Error;
-use std::fs::File;
-use std::io::BufReader;
 
-fn main() -> Result<(), eframe::Error> {
+fn main() {
     let native_options = NativeOptions::default();
     eframe::run_native(
         "Data Visualizer",
         native_options,
         Box::new(|cc| Box::new(DataVisualizer::new(cc))),
-    )
+    );
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-struct DataPoint {
-    x: f64,
-    y: f64,
+#[derive(Deserialize, Serialize, Default)]
+pub struct DataVisualizer {
+    // Example state (replace with your actual data and settings)
+    pub settings: Settings,
 }
 
-struct DataVisualizer {
-    data: Vec<DataPoint>,
-    settings: Settings,
+#[derive(Deserialize, Serialize, Default, Clone)]
+pub struct Settings {
+    pub theme: Theme,
+    // Example setting:
+    pub show_grid: bool,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct Settings {
-    line_color: egui::Color32,
-    line_width: f32,
-    x_axis_label: String,
-    y_axis_label: String,
-    title: String,
+#[derive(Deserialize, Serialize, PartialEq, Clone)]
+pub enum Theme {
+    Light,
+    Dark,
 }
 
-impl Default for Settings {
+impl Default for Theme {
     fn default() -> Self {
-        Self {
-            line_color: egui::Color32::BLUE,
-            line_width: 2.0,
-            x_axis_label: "X".to_string(),
-            y_axis_label: "Y".to_string(),
-            title: "Data Plot".to_string(),
-        }
+        Theme::Light
     }
 }
 
 impl DataVisualizer {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Customize egui here with cc.egui_ctx.
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-
         // Load previous app state (if any).
-        let settings = if let Some(storage) = cc.storage {
-            eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
-        } else {
-            Settings::default()
-        };
-
-        let data = load_data_from_csv("data.csv").unwrap_or(vec![]);
-
-        DataVisualizer {
-            data,
-            settings,
+        // Note that you must enable the `persistence` feature for this to work.
+        if let Some(storage) = cc.storage {
+            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
         }
+
+        Default::default()
     }
 }
 
 impl App for DataVisualizer {
+    /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        // Examples of how to create different panels and windows.
+        // Pick whichever suits you.
+        // Tip: a good default choice is to just use CentralPanel::default().
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::SidePanel::left("settings_panel").show_inside(ui, |ui| {
+            egui::SidePanel::left("settings_panel").show(ui, |ui| {
                 ui.heading("Settings");
-                ui.separator();
 
-                ui.label("Line Color:");
-                egui::color_picker::color_edit_button_sr(ui, &mut self.settings.line_color);
+                ui.checkbox(&mut self.settings.show_grid, "Show Grid");
 
-                ui.add(egui::Slider::new(&mut self.settings.line_width, 1.0..=5.0).text("Line Width"));
+                ui.horizontal(|ui| {
+                    ui.label("Theme:");
+                    if ui.radio(self.settings.theme == Theme::Light, "Light").clicked() {
+                        self.settings.theme = Theme::Light;
+                    }
+                    if ui.radio(self.settings.theme == Theme::Dark, "Dark").clicked() {
+                        self.settings.theme = Theme::Dark;
+                    }
+                });
 
-                ui.label("X Axis Label:");
-                ui.text_edit_singleline(&mut self.settings.x_axis_label);
-
-                ui.label("Y Axis Label:");
-                ui.text_edit_singleline(&mut self.settings.y_axis_label);
-
-                 ui.label("Title:");
-                ui.text_edit_singleline(&mut self.settings.title);
+                if ui.button("Quit").clicked() {
+                    frame.close();
+                }
             });
 
-            egui::CentralPanel::default().show_inside(ui, |ui| {
-                let values: Vec<Value> = self
-                    .data
-                    .iter()
-                    .map(|dp| Value::new(dp.x, dp.y))
-                    .collect();
-
-                let line = Line::new(Values::from_values(values)).color(self.settings.line_color).width(self.settings.line_width);
-
-                Plot::new("data_plot")
-                    .title(self.settings.title.clone())
-                    .x_axis_label(self.settings.x_axis_label.clone())
-                    .y_axis_label(self.settings.y_axis_label.clone())
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("Data Visualization");
+                ui.label("Here is where the visualization will be.");
+                // Example plot (replace with actual plotting logic)
+                egui::widgets::plot::Plot::new("my_plot")
+                    .view_aspect(2.0)
                     .show(ui, |plot_ui| {
-                        plot_ui.line(line);
+                        plot_ui.line(egui::widgets::plot::Line::new(
+                            vec![[0.0, 0.0], [1.0, 1.0]],
+                        ));
                     });
             });
         });
     }
 
+    /// Called once before the first frame. All code that set up the app (load resources, …) should be done here.
+    fn setup(
+        &mut self,
+        _ctx: &egui::Context,
+        _frame: &mut Frame,
+        _storage: Option<&dyn eframe::Storage>,
+    ) {
+        // Load previous app state (if any).
+        // Note that you must enable the `persistence` feature for this to work.
+        // if let Some(storage) = storage {
+        //     *self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
+        // }
+    }
+
+    /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, &self.settings);
+        eframe::set_value(storage, eframe::APP_KEY, self);
     }
-}
-
-fn load_data_from_csv(path: &str) -> Result<Vec<DataPoint>, Box<dyn Error>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut csv_reader = csv::Reader::from_reader(reader);
-    let mut data: Vec<DataPoint> = Vec::new();
-
-    for result in csv_reader.deserialize() {
-        let record: DataPoint = result?;
-        data.push(record);
-    }
-
-    Ok(data)
 }
