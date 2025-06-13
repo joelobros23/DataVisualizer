@@ -1,220 +1,199 @@
 use eframe::{egui, App, Frame, NativeOptions};
+use egui::plot::{Line, Plot, Value, Values};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 
-use plotters::prelude::*;
+fn main() {
+    let native_options = NativeOptions::default();
+    eframe::run_native(
+        "DataVisualizer",
+        native_options,
+        Box::new(|cc| Box::new(DataVisualizer::new(cc))),
+    );
+}
 
-mod chart_renderer;
-
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct DataPoint {
     x: f64,
     y: f64,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-struct Config {
-    file_path: String,
-    chart_type: ChartType,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DataSet {
+    name: String,
+    points: Vec<DataPoint>,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+struct DataVisualizer {
+    data_sets: Vec<DataSet>,
+    file_path: String,
+    chart_type: ChartType,
+    x_axis_label: String,
+    y_axis_label: String,
+    filter_value: f64,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum ChartType {
-    Scatter,
     Line,
-    Bar,
+    Scatter,
 }
 
 impl std::fmt::Display for ChartType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChartType::Scatter => write!(f, "Scatter"),
             ChartType::Line => write!(f, "Line"),
-            ChartType::Bar => write!(f, "Bar"),
+            ChartType::Scatter => write!(f, "Scatter"),
         }
     }
 }
 
-struct DataVisualizerApp {
-    config: Config,
-    data: Vec<DataPoint>,
-    error_message: Option<String>,
-}
-
-impl Default for DataVisualizerApp {
-    fn default() -> Self {
-        Self {
-            config: Config {
-                file_path: "data.json".to_string(),
-                chart_type: ChartType::Scatter,
-            },
-            data: Vec::new(),
-            error_message: None,
-        }
-    }
-}
-
-impl DataVisualizerApp {
+impl DataVisualizer {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // Customize egui here with cc.egui_ctx.set_visuals and cc.egui_ctx.set_fonts.
-
-        let mut app = DataVisualizerApp::default();
-        app.load_data_and_config();  // Load data immediately after creation
-        app
-    }
-
-    fn load_data_and_config(&mut self) {
-        if let Err(e) = self.load_config() {
-            self.error_message = Some(format!("Error loading config: {}", e));
-        } else if let Err(e) = self.load_data() {
-            self.error_message = Some(format!("Error loading data: {}", e));
-        } else {
-            self.error_message = None;
+        DataVisualizer {
+            data_sets: Vec::new(),
+            file_path: String::new(),
+            chart_type: ChartType::Line,
+            x_axis_label: "X".to_string(),
+            y_axis_label: "Y".to_string(),
+            filter_value: 0.0,
         }
-    }
-
-    fn load_config(&mut self) -> Result<(), Box<dyn Error>> {
-        let file = File::open("config.json")?;
-        let reader = BufReader::new(file);
-        self.config = serde_json::from_reader(reader)?;
-        Ok(())
     }
 
     fn load_data(&mut self) -> Result<(), Box<dyn Error>> {
-        let file_path = &self.config.file_path;
-        let file = File::open(file_path)?;
-        let reader = BufReader::new(file);
-
-        // Check the file extension to determine parsing method
-        if file_path.ends_with(".json") {
-            self.data = serde_json::from_reader(reader)?;
-        } else if file_path.ends_with(".csv") {
-            let mut csv_reader = csv::Reader::from_reader(reader);
-            self.data = csv_reader
-                .deserialize()
-                .filter_map(Result::ok)
-                .collect();
+        if self.file_path.ends_with(".json") {
+            self.load_json()
+        } else if self.file_path.ends_with(".csv") {
+            self.load_csv()
         } else {
-            return Err(From::from("Unsupported file format.  Use .json or .csv"));
+            Err("Unsupported file type".into())
         }
+    }
+
+    fn load_json(&mut self) -> Result<(), Box<dyn Error>> {
+        let file = File::open(&self.file_path)?;
+        let reader = BufReader::new(file);
+        self.data_sets = serde_json::from_reader(reader)?;
         Ok(())
     }
 
-    fn render_chart(&self, ui: &mut egui::Ui) {
-        let chart_type = self.config.chart_type;
-        let data = &self.data;
+    fn load_csv(&mut self) -> Result<(), Box<dyn Error>> {
+        let file = File::open(&self.file_path)?;
+        let mut rdr = csv::Reader::from_reader(file);
+        let mut data_sets = Vec::new();
 
-        let frame = Frame::canvas(&ui.style());
-        frame.show(ui, |ui| {
-            let (response, painter) = ui.allocate_painter(ui.available_size_fixed(), egui::Sense::hover());
-            let rect = response.rect;
-
-            let mut plot_buffer = vec![0u8; rect.width() as usize * rect.height() as usize * 4];
-
-            {
-                let root = BitMapBackend::with_buffer(&mut plot_buffer, (rect.width() as u32, rect.height() as u32)).into_drawing_area();
-                root.fill(&WHITE).unwrap();
-
-                if data.is_empty() {
-                    root.print(
-                        (rect.width() as i32 / 2, rect.height() as i32 / 2),
-                        &TextStyle::from(("sans-serif", 20).into_font()).color(&BLACK),
-                        &"No data to display",
-                    ).unwrap();
-                } else {
-
-                    let mut chart_builder = ChartBuilder::on(&root)
-                        .margin(20)
-                        .x_label_area_size(30)
-                        .y_label_area_size(30);
-
-                    let (min_x, max_x, min_y, max_y) = data.iter().fold((f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY), |(min_x, max_x, min_y, max_y), point| {
-                        (min_x.min(point.x), max_x.max(point.x), min_y.min(point.y), max_y.max(point.y))
-                    });
-
-                    let mut chart = chart_builder
-                        .build_cartesian_2d(min_x..max_x, min_y..max_y).unwrap();
-
-                    chart.configure_mesh().draw().unwrap();
-
-                    match chart_type {
-                        ChartType::Scatter => {
-                            for point in data {
-                                chart.draw_series(std::iter::once(Circle::new((point.x, point.y), 5, ShapeStyle::from(&RED).filled()))).unwrap(); // Adjust radius as needed
-                            }
-                        }
-                        ChartType::Line => {
-                            let data_series: Vec<(f64, f64)> = data.iter().map(|p| (p.x, p.y)).collect();
-                            chart.draw_series(LineSeries::new(data_series, &BLUE)).unwrap();
-                        }
-                        ChartType::Bar => {
-                            let bar_width = (max_x - min_x) / data.len() as f64;
-                            for point in data {
-                                chart.draw_series(std::iter::once(Rectangle::new([(point.x - bar_width / 2.0), 0.0], [(point.x + bar_width / 2.0), point.y], ShapeStyle::from(&GREEN).filled()))).unwrap();
-                            }
-                        }
-                    }
-                }
+        for result in rdr.records() {
+            let record = result?;
+            // Assuming CSV structure: name, x, y
+            if record.len() != 3 {
+                continue; // Skip malformed records
             }
 
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                [rect.width() as usize, rect.height() as usize],
-                &plot_buffer,
-            );
-            let texture_handle = ui.ctx().load_texture("plot_texture", color_image);
-            painter.image(
-                texture_handle.id(),
-                rect,
-                egui::Rect::from_min_max(egui::Pos2::new(0.0, 0.0), egui::Pos2::new(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-        });
+            let name = record[0].to_string();
+            let x: f64 = record[1].parse().unwrap_or(0.0);
+            let y: f64 = record[2].parse().unwrap_or(0.0);
+
+            // Check if the dataset already exists
+            if let Some(data_set) = data_sets.iter_mut().find(|ds| ds.name == name) {
+                data_set.points.push(DataPoint { x, y });
+            } else {
+                // Create a new dataset
+                data_sets.push(DataSet {
+                    name: name.clone(),
+                    points: vec![DataPoint { x, y }],
+                });
+            }
+        }
+        self.data_sets = data_sets;
+        Ok(())
     }
 }
 
-impl App for DataVisualizerApp {
+impl App for DataVisualizer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Data Visualizer");
+        egui::SidePanel::left("side_panel").show(ctx, |ui| {
+            ui.heading("Settings");
 
             ui.horizontal(|ui| {
-                ui.label("Data File:");
-                ui.text_edit_singleline(&mut self.config.file_path);
-                if ui.button("Load Data").clicked() {
-                    self.load_data_and_config();
+                ui.label("File:");
+                ui.text_edit_singleline(&mut self.file_path);
+                if ui.button("Load").clicked() {
+                    if let Err(e) = self.load_data() {
+                        eprintln!("Error loading data: {}", e);
+                    }
                 }
             });
 
             egui::ComboBox::from_label("Chart Type")
-                .selected_text(format!("{}", self.config.chart_type))
+                .selected_text(format!("{}", self.chart_type))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.config.chart_type, ChartType::Scatter, "Scatter Plot");
-                    ui.selectable_value(&mut self.config.chart_type, ChartType::Line, "Line Graph");
-                    ui.selectable_value(&mut self.config.chart_type, ChartType::Bar, "Bar Chart");
+                    ui.selectable_value(&mut self.chart_type, ChartType::Line, "Line");
+                    ui.selectable_value(&mut self.chart_type, ChartType::Scatter, "Scatter");
                 });
 
-            if let Some(err) = &self.error_message {
-                ui.label(egui::RichText::new(err).color(egui::Color32::RED));
-            } else {
-                self.render_chart(ui);
-            }
+            ui.horizontal(|ui| {
+                ui.label("X Axis Label:");
+                ui.text_edit_singleline(&mut self.x_axis_label);
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Y Axis Label:");
+                ui.text_edit_singleline(&mut self.y_axis_label);
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Filter Value:");
+                ui.add(egui::DragValue::new(&mut self.filter_value));
+            });
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let filtered_data_sets: Vec<DataSet> = self
+                .data_sets
+                .clone()
+                .into_iter()
+                .map(|ds| DataSet {
+                    name: ds.name,
+                    points: ds
+                        .points
+                        .into_iter()
+                        .filter(|dp| dp.y > self.filter_value)
+                        .collect(),
+                })
+                .collect();
+
+            let plot = Plot::new("data_plot")
+                .view_aspect(2.0)
+                .x_axis_label(self.x_axis_label.clone())
+                .y_axis_label(self.y_axis_label.clone());
+
+            plot.show(ui, |plot_ui| {
+                for data_set in &filtered_data_sets {
+                    let values: Values = data_set
+                        .points
+                        .iter()
+                        .map(|dp| Value { x: dp.x, y: dp.y })
+                        .collect();
+
+                    match self.chart_type {
+                        ChartType::Line => {
+                            let line = Line::new(values).name(data_set.name.clone());
+                            plot_ui.line(line);
+                        }
+                        ChartType::Scatter => {
+                            let points: Vec<[f64; 2]> = data_set
+                                .points
+                                .iter()
+                                .map(|dp| [dp.x, dp.y])
+                                .collect();
+                            plot_ui.points(plotters::egui_plot::Points::new(points).name(data_set.name.clone()));
+                        }
+                    }
+                }
+            });
         });
     }
-}
-
-fn main() -> Result<(), eframe::Error> {
-    let options = NativeOptions {
-        initial_window_size: Some(egui::vec2(800.0, 600.0)),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Data Visualizer",
-        options,
-        Box::new(|cc| {
-            egui_extras::install_image_loaders(&cc.egui_ctx);
-            Box::new(DataVisualizerApp::new(cc))
-        }),
-    )
 }
