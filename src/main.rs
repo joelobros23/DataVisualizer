@@ -1,110 +1,220 @@
 use eframe::{egui, App, Frame, NativeOptions};
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fs::File;
+use std::io::{BufReader, Read};
 
-fn main() {
-    let native_options = NativeOptions::default();
-    eframe::run_native(
-        "Data Visualizer",
-        native_options,
-        Box::new(|cc| Box::new(DataVisualizer::new(cc))),
-    );
+use plotters::prelude::*;
+
+mod chart_renderer;
+
+#[derive(Deserialize, Serialize, Debug)]
+struct DataPoint {
+    x: f64,
+    y: f64,
 }
 
-#[derive(Deserialize, Serialize, Default)]
-pub struct DataVisualizer {
-    // Example state (replace with your actual data and settings)
-    pub settings: Settings,
+#[derive(Deserialize, Serialize, Debug)]
+struct Config {
+    file_path: String,
+    chart_type: ChartType,
 }
 
-#[derive(Deserialize, Serialize, Default, Clone)]
-pub struct Settings {
-    pub theme: Theme,
-    // Example setting:
-    pub show_grid: bool,
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+enum ChartType {
+    Scatter,
+    Line,
+    Bar,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone)]
-pub enum Theme {
-    Light,
-    Dark,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::Light
-    }
-}
-
-impl DataVisualizer {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
-        if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+impl std::fmt::Display for ChartType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChartType::Scatter => write!(f, "Scatter"),
+            ChartType::Line => write!(f, "Line"),
+            ChartType::Bar => write!(f, "Bar"),
         }
-
-        Default::default()
     }
 }
 
-impl App for DataVisualizer {
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, frame: &mut Frame) {
-        // Examples of how to create different panels and windows.
-        // Pick whichever suits you.
-        // Tip: a good default choice is to just use CentralPanel::default().
+struct DataVisualizerApp {
+    config: Config,
+    data: Vec<DataPoint>,
+    error_message: Option<String>,
+}
+
+impl Default for DataVisualizerApp {
+    fn default() -> Self {
+        Self {
+            config: Config {
+                file_path: "data.json".to_string(),
+                chart_type: ChartType::Scatter,
+            },
+            data: Vec::new(),
+            error_message: None,
+        }
+    }
+}
+
+impl DataVisualizerApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Customize egui here with cc.egui_ctx.set_visuals and cc.egui_ctx.set_fonts.
+
+        let mut app = DataVisualizerApp::default();
+        app.load_data_and_config();  // Load data immediately after creation
+        app
+    }
+
+    fn load_data_and_config(&mut self) {
+        if let Err(e) = self.load_config() {
+            self.error_message = Some(format!("Error loading config: {}", e));
+        } else if let Err(e) = self.load_data() {
+            self.error_message = Some(format!("Error loading data: {}", e));
+        } else {
+            self.error_message = None;
+        }
+    }
+
+    fn load_config(&mut self) -> Result<(), Box<dyn Error>> {
+        let file = File::open("config.json")?;
+        let reader = BufReader::new(file);
+        self.config = serde_json::from_reader(reader)?;
+        Ok(())
+    }
+
+    fn load_data(&mut self) -> Result<(), Box<dyn Error>> {
+        let file_path = &self.config.file_path;
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
+
+        // Check the file extension to determine parsing method
+        if file_path.ends_with(".json") {
+            self.data = serde_json::from_reader(reader)?;
+        } else if file_path.ends_with(".csv") {
+            let mut csv_reader = csv::Reader::from_reader(reader);
+            self.data = csv_reader
+                .deserialize()
+                .filter_map(Result::ok)
+                .collect();
+        } else {
+            return Err(From::from("Unsupported file format.  Use .json or .csv"));
+        }
+        Ok(())
+    }
+
+    fn render_chart(&self, ui: &mut egui::Ui) {
+        let chart_type = self.config.chart_type;
+        let data = &self.data;
+
+        let frame = Frame::canvas(&ui.style());
+        frame.show(ui, |ui| {
+            let (response, painter) = ui.allocate_painter(ui.available_size_fixed(), egui::Sense::hover());
+            let rect = response.rect;
+
+            let mut plot_buffer = vec![0u8; rect.width() as usize * rect.height() as usize * 4];
+
+            {
+                let root = BitMapBackend::with_buffer(&mut plot_buffer, (rect.width() as u32, rect.height() as u32)).into_drawing_area();
+                root.fill(&WHITE).unwrap();
+
+                if data.is_empty() {
+                    root.print(
+                        (rect.width() as i32 / 2, rect.height() as i32 / 2),
+                        &TextStyle::from(("sans-serif", 20).into_font()).color(&BLACK),
+                        &"No data to display",
+                    ).unwrap();
+                } else {
+
+                    let mut chart_builder = ChartBuilder::on(&root)
+                        .margin(20)
+                        .x_label_area_size(30)
+                        .y_label_area_size(30);
+
+                    let (min_x, max_x, min_y, max_y) = data.iter().fold((f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY), |(min_x, max_x, min_y, max_y), point| {
+                        (min_x.min(point.x), max_x.max(point.x), min_y.min(point.y), max_y.max(point.y))
+                    });
+
+                    let mut chart = chart_builder
+                        .build_cartesian_2d(min_x..max_x, min_y..max_y).unwrap();
+
+                    chart.configure_mesh().draw().unwrap();
+
+                    match chart_type {
+                        ChartType::Scatter => {
+                            for point in data {
+                                chart.draw_series(std::iter::once(Circle::new((point.x, point.y), 5, ShapeStyle::from(&RED).filled()))).unwrap(); // Adjust radius as needed
+                            }
+                        }
+                        ChartType::Line => {
+                            let data_series: Vec<(f64, f64)> = data.iter().map(|p| (p.x, p.y)).collect();
+                            chart.draw_series(LineSeries::new(data_series, &BLUE)).unwrap();
+                        }
+                        ChartType::Bar => {
+                            let bar_width = (max_x - min_x) / data.len() as f64;
+                            for point in data {
+                                chart.draw_series(std::iter::once(Rectangle::new([(point.x - bar_width / 2.0), 0.0], [(point.x + bar_width / 2.0), point.y], ShapeStyle::from(&GREEN).filled()))).unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [rect.width() as usize, rect.height() as usize],
+                &plot_buffer,
+            );
+            let texture_handle = ui.ctx().load_texture("plot_texture", color_image);
+            painter.image(
+                texture_handle.id(),
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::new(0.0, 0.0), egui::Pos2::new(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        });
+    }
+}
+
+impl App for DataVisualizerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::SidePanel::left("settings_panel").show(ui, |ui| {
-                ui.heading("Settings");
+            ui.heading("Data Visualizer");
 
-                ui.checkbox(&mut self.settings.show_grid, "Show Grid");
-
-                ui.horizontal(|ui| {
-                    ui.label("Theme:");
-                    if ui.radio(self.settings.theme == Theme::Light, "Light").clicked() {
-                        self.settings.theme = Theme::Light;
-                    }
-                    if ui.radio(self.settings.theme == Theme::Dark, "Dark").clicked() {
-                        self.settings.theme = Theme::Dark;
-                    }
-                });
-
-                if ui.button("Quit").clicked() {
-                    frame.close();
+            ui.horizontal(|ui| {
+                ui.label("Data File:");
+                ui.text_edit_singleline(&mut self.config.file_path);
+                if ui.button("Load Data").clicked() {
+                    self.load_data_and_config();
                 }
             });
 
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("Data Visualization");
-                ui.label("Here is where the visualization will be.");
-                // Example plot (replace with actual plotting logic)
-                egui::widgets::plot::Plot::new("my_plot")
-                    .view_aspect(2.0)
-                    .show(ui, |plot_ui| {
-                        plot_ui.line(egui::widgets::plot::Line::new(
-                            vec![[0.0, 0.0], [1.0, 1.0]],
-                        ));
-                    });
-            });
+            egui::ComboBox::from_label("Chart Type")
+                .selected_text(format!("{}", self.config.chart_type))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.config.chart_type, ChartType::Scatter, "Scatter Plot");
+                    ui.selectable_value(&mut self.config.chart_type, ChartType::Line, "Line Graph");
+                    ui.selectable_value(&mut self.config.chart_type, ChartType::Bar, "Bar Chart");
+                });
+
+            if let Some(err) = &self.error_message {
+                ui.label(egui::RichText::new(err).color(egui::Color32::RED));
+            } else {
+                self.render_chart(ui);
+            }
         });
     }
+}
 
-    /// Called once before the first frame. All code that set up the app (load resources, …) should be done here.
-    fn setup(
-        &mut self,
-        _ctx: &egui::Context,
-        _frame: &mut Frame,
-        _storage: Option<&dyn eframe::Storage>,
-    ) {
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
-        // if let Some(storage) = storage {
-        //     *self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
-        // }
-    }
-
-    /// Called by the frame work to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    }
+fn main() -> Result<(), eframe::Error> {
+    let options = NativeOptions {
+        initial_window_size: Some(egui::vec2(800.0, 600.0)),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Data Visualizer",
+        options,
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Box::new(DataVisualizerApp::new(cc))
+        }),
+    )
 }
